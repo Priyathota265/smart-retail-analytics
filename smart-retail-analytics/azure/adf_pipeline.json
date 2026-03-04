@@ -1,0 +1,185 @@
+{
+  "name": "PL_RetailEdge_Master_Ingestion",
+  "description": "Master ADF pipeline: ingest raw CSV from ADLS → validate → load to SQL DW → trigger AI scoring",
+  "properties": {
+    "activities": [
+
+      {
+        "name": "Copy_Sales_CSV_to_Staging",
+        "type": "Copy",
+        "dependsOn": [],
+        "typeProperties": {
+          "source": {
+            "type": "DelimitedTextSource",
+            "storeSettings": {
+              "type": "AzureBlobFSReadSettings",
+              "recursive": false,
+              "wildcardFileName": "sales_*.csv"
+            },
+            "formatSettings": { "type": "DelimitedTextReadSettings" }
+          },
+          "sink": {
+            "type": "AzureSqlSink",
+            "writeBehavior": "insert",
+            "sqlWriterStoredProcedureName": null,
+            "tableOption": "autoCreate",
+            "preCopyScript": "TRUNCATE TABLE staging.SalesRaw"
+          },
+          "translator": {
+            "type": "TabularTranslator",
+            "typeConversion": true
+          }
+        },
+        "inputs": [{ "referenceName": "DS_ADLS_SalesCSV", "type": "DatasetReference" }],
+        "outputs": [{ "referenceName": "DS_SQL_SalesRaw", "type": "DatasetReference" }]
+      },
+
+      {
+        "name": "Copy_Customer_CSV_to_Staging",
+        "type": "Copy",
+        "dependsOn": [],
+        "typeProperties": {
+          "source": {
+            "type": "DelimitedTextSource",
+            "storeSettings": { "type": "AzureBlobFSReadSettings", "recursive": false }
+          },
+          "sink": {
+            "type": "AzureSqlSink",
+            "preCopyScript": "TRUNCATE TABLE staging.CustomerRaw"
+          }
+        },
+        "inputs": [{ "referenceName": "DS_ADLS_CustomerCSV", "type": "DatasetReference" }],
+        "outputs": [{ "referenceName": "DS_SQL_CustomerRaw", "type": "DatasetReference" }]
+      },
+
+      {
+        "name": "Copy_Inventory_CSV_to_Staging",
+        "type": "Copy",
+        "dependsOn": [],
+        "typeProperties": {
+          "source": { "type": "DelimitedTextSource" },
+          "sink": {
+            "type": "AzureSqlSink",
+            "preCopyScript": "TRUNCATE TABLE staging.InventoryRaw"
+          }
+        },
+        "inputs": [{ "referenceName": "DS_ADLS_InventoryCSV", "type": "DatasetReference" }],
+        "outputs": [{ "referenceName": "DS_SQL_InventoryRaw", "type": "DatasetReference" }]
+      },
+
+      {
+        "name": "SP_Load_FactSales",
+        "type": "SqlServerStoredProcedure",
+        "dependsOn": [
+          { "activity": "Copy_Sales_CSV_to_Staging", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "storedProcedureName": "dwh.usp_LoadFactSales",
+          "storedProcedureParameters": {
+            "BatchDate": { "value": "@formatDateTime(utcNow(), 'yyyy-MM-dd')", "type": "String" }
+          }
+        },
+        "linkedServiceName": { "referenceName": "LS_AzureSQL_RetailEdge", "type": "LinkedServiceReference" }
+      },
+
+      {
+        "name": "SP_Refresh_Customer_Activity",
+        "type": "SqlServerStoredProcedure",
+        "dependsOn": [
+          { "activity": "SP_Load_FactSales", "dependencyConditions": ["Succeeded"] },
+          { "activity": "Copy_Customer_CSV_to_Staging", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "storedProcedureName": "dwh.usp_RefreshCustomerActivity"
+        },
+        "linkedServiceName": { "referenceName": "LS_AzureSQL_RetailEdge", "type": "LinkedServiceReference" }
+      },
+
+      {
+        "name": "SP_Refresh_Inventory_Snapshot",
+        "type": "SqlServerStoredProcedure",
+        "dependsOn": [
+          { "activity": "Copy_Inventory_CSV_to_Staging", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "storedProcedureName": "dwh.usp_RefreshInventorySnapshot"
+        },
+        "linkedServiceName": { "referenceName": "LS_AzureSQL_RetailEdge", "type": "LinkedServiceReference" }
+      },
+
+      {
+        "name": "Trigger_AI_Churn_Model",
+        "description": "Calls Azure ML endpoint to score churn and writes back to staging.ChurnScores",
+        "type": "WebActivity",
+        "dependsOn": [
+          { "activity": "SP_Refresh_Customer_Activity", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "url": "@concat(pipeline().parameters.AzureMLEndpoint, '/score')",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Authorization": "@concat('Bearer ', activity('Get_AML_Key').output.value)"
+          },
+          "body": {
+            "Inputs": { "input1": [] },
+            "GlobalParameters": {}
+          }
+        }
+      },
+
+      {
+        "name": "SP_Apply_Churn_Scores",
+        "type": "SqlServerStoredProcedure",
+        "dependsOn": [
+          { "activity": "Trigger_AI_Churn_Model", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "storedProcedureName": "dwh.usp_ApplyChurnScores"
+        },
+        "linkedServiceName": { "referenceName": "LS_AzureSQL_RetailEdge", "type": "LinkedServiceReference" }
+      },
+
+      {
+        "name": "Trigger_GPT_Insights",
+        "description": "Calls GPT insights Python function to generate narratives and save to dwh.AIInsights",
+        "type": "AzureFunctionActivity",
+        "dependsOn": [
+          { "activity": "SP_Apply_Churn_Scores", "dependencyConditions": ["Succeeded"] },
+          { "activity": "SP_Refresh_Inventory_Snapshot", "dependencyConditions": ["Succeeded"] }
+        ],
+        "typeProperties": {
+          "functionName": "fn_generate_gpt_insights",
+          "method": "POST",
+          "body": {
+            "run_date": "@formatDateTime(utcNow(), 'yyyy-MM-dd')"
+          }
+        },
+        "linkedServiceName": { "referenceName": "LS_AzureFunction_Insights", "type": "LinkedServiceReference" }
+      }
+
+    ],
+
+    "parameters": {
+      "AzureMLEndpoint": { "type": "string" },
+      "RunDate":         { "type": "string", "defaultValue": "@formatDateTime(utcNow(),'yyyy-MM-dd')" }
+    },
+
+    "annotations": ["RetailEdge", "Daily ETL", "v1.0"],
+
+    "triggers": [
+      {
+        "name": "Daily_5AM_Trigger",
+        "type": "ScheduleTrigger",
+        "typeProperties": {
+          "recurrence": {
+            "frequency": "Day",
+            "interval": 1,
+            "startTime": "2026-01-01T05:00:00Z",
+            "timeZone": "Central Standard Time"
+          }
+        }
+      }
+    ]
+  }
+}

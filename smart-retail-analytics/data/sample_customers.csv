@@ -1,0 +1,9 @@
+CustomerID,FirstName,LastName,Email,Segment,Region,State,City,JoinDate
+CUST001,Emma,Johnson,emma.j@email.com,Premium,South,TX,Houston,2021-05-10
+CUST002,Michael,Chen,m.chen@email.com,Regular,South,TX,Dallas,2022-01-20
+CUST003,Aisha,Patel,a.patel@email.com,At-Risk,Northeast,NY,New York,2020-08-15
+CUST004,Carlos,Rivera,c.rivera@email.com,Premium,South,TX,Austin,2019-11-30
+CUST005,Sarah,Williams,s.williams@email.com,Regular,South,TX,Houston,2023-03-05
+CUST006,James,Kim,j.kim@email.com,Regular,Northeast,NY,New York,2022-07-22
+CUST007,Priya,Sharma,priya.s@email.com,Premium,South,TX,Dallas,2021-02-14
+CUST008,David,Brown,d.brown@email.com,At-Risk,South,TX,Houston,2020-06-01
